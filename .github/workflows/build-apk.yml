@@ -1,15 +1,18 @@
 name: Build APK
 
 # Manual build: Actions tab -> "Build APK" -> Run workflow.
-# Needs no secrets for a debug build. The APK is attached to the run as an artifact.
+# Release builds are signed with the keystore stored in repository secrets
+# (KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD), so only builds
+# signed with your key can update the installed app. Debug builds need no secrets.
+# The APK is attached to the run as an artifact.
 
 on:
   workflow_dispatch:
     inputs:
       variant:
-        description: Build variant (fullDebug needs no secrets)
+        description: Build variant (*Release is signed with your keystore secrets, *Debug needs none)
         type: choice
-        default: fullDebug
+        default: fullRelease
         options:
           - fullDebug
           - fullRelease
