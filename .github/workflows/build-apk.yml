@@ -1,0 +1,124 @@
+name: Build APK
+
+# Manual build: Actions tab -> "Build APK" -> Run workflow.
+# Needs no secrets for a debug build. The APK is attached to the run as an artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Build variant (fullDebug needs no secrets)
+        type: choice
+        default: fullDebug
+        options:
+          - fullDebug
+          - fullRelease
+          - aapsclientDebug
+          - aapsclientRelease
+          - aapsclient2Debug
+          - aapsclient2Release
+          - pumpcontrolDebug
+          - pumpcontrolRelease
+      java_version:
+        description: JDK version (21 for AAPS 3.3 and 4.x, 17 for 3.1 and 3.2)
+        type: string
+        default: "21"
+      build_wear:
+        description: Also build the Wear OS (watch) APK
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      VARIANT: ${{ inputs.variant }}
+      BUILD_WEAR: ${{ inputs.build_wear }}
+      # Optional repository secrets, only used for *Release variants (Settings -> Secrets and variables -> Actions).
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    steps:
+      - name: Check out the fork
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: gradle
+
+      - name: Work out flavor and build type
+        run: |
+          case "$VARIANT" in
+            *Debug)   TYPE=debug ;;
+            *Release) TYPE=release ;;
+            *) echo "Unknown variant: $VARIANT"; exit 1 ;;
+          esac
+          FLAVOR="${VARIANT%Debug}"
+          FLAVOR="${FLAVOR%Release}"
+          echo "VARIANT_TYPE=$TYPE" >> "$GITHUB_ENV"
+          echo "VARIANT_FLAVOR=$FLAVOR" >> "$GITHUB_ENV"
+
+      - name: Decode keystore (release builds only)
+        if: env.VARIANT_TYPE == 'release'
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::error::Release builds need the secrets KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD. Use fullDebug to build without them."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/keystore"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/keystore/keystore.jks"
+          keytool -list -keystore "$RUNNER_TEMP/keystore/keystore.jks" \
+            -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build
+        run: |
+          TASKS=":app:assemble${VARIANT}"
+          if [ "$BUILD_WEAR" = "true" ]; then
+            TASKS="$TASKS :wear:assemble${VARIANT}"
+          fi
+
+          SIGN_ARGS=()
+          if [ "$VARIANT_TYPE" = "release" ]; then
+            SIGN_ARGS=(
+              "-Pandroid.injected.signing.store.file=$RUNNER_TEMP/keystore/keystore.jks"
+              "-Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD"
+              "-Pandroid.injected.signing.key.alias=$KEY_ALIAS"
+              "-Pandroid.injected.signing.key.password=$KEY_PASSWORD"
+            )
+          fi
+
+          ./gradlew $TASKS \
+            "-Dorg.gradle.jvmargs=-Xmx6g -XX:+UseParallelGC -Xss4m" \
+            -Dorg.gradle.caching=true \
+            --stacktrace \
+            "${SIGN_ARGS[@]}"
+
+      - name: Collect APKs
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/"$VARIANT_FLAVOR"/"$VARIANT_TYPE"/*.apk out/
+          if [ "$BUILD_WEAR" = "true" ]; then
+            for f in wear/build/outputs/apk/"$VARIANT_FLAVOR"/"$VARIANT_TYPE"/*.apk; do
+              cp "$f" "out/wear-$(basename "$f")"
+            done
+          fi
+          ls -l out
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: aaps-${{ inputs.variant }}
+          path: out/*.apk
+          if-no-files-found: error
+          retention-days: 30
